@@ -2,6 +2,7 @@ import sys
 import numpy as np
 import os
 import random
+import json
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QSlider, QLabel, QComboBox, QFileDialog, QCheckBox, QComboBox
 )
@@ -39,10 +40,32 @@ class ProceduralMusicApp(QWidget):
         self.audio_stream = None
         self.tempo = 60
 
+        self.scenes = []
+        self.random_scene_enabled = False
+        self.current_scene_index = 0
+        self.scene_duration = 30  
+        self.scene_timer = 0.0
+        self.auto_scene_enabled = False
+
         self.timer = QTimer()
         self.timer.timeout.connect(self.stream_chunk)
 
     def init_ui(self):
+        
+        self.random_scene_toggle = QCheckBox("Enable Procedural Random Scenes")
+        self.random_scene_toggle.setChecked(False)
+        self.layout.addWidget(self.random_scene_toggle)
+
+        
+        self.auto_scene_toggle = QCheckBox("Enable Automatic Scene Switching")
+        self.layout.addWidget(self.auto_scene_toggle)
+
+        self.scene_duration_slider = QSlider(Qt.Orientation.Horizontal)
+        self.scene_duration_slider.setRange(5, 300)  # 5s to 5min per scene
+        self.scene_duration_slider.setValue(self.scene_duration)
+        self.layout.addWidget(QLabel("Scene Duration (s)"))
+        self.layout.addWidget(self.scene_duration_slider)
+
         # Tempo slider
         self.tempo_label = QLabel(f"Tempo: {self.tempo} BPM")
         self.tempo_slider = QSlider(Qt.Orientation.Horizontal)
@@ -135,12 +158,37 @@ class ProceduralMusicApp(QWidget):
         self.random_preset_btn = QPushButton("Random Preset")
         self.layout.addWidget(self.random_preset_btn)
 
+        self.evolving_toggle = QCheckBox("Enable Evolving Preset")
+        self.evolving_toggle.setChecked(False)
+        self.layout.addWidget(self.evolving_toggle)
+
+        self.export_btn = QPushButton("Export Full Session")
+        self.layout.addWidget(self.export_btn)
+        self.session_duration_slider = QSlider(Qt.Orientation.Horizontal)
+        self.session_duration_slider.setRange(10, 3600)  # 10s to 1h
+        self.session_duration_slider.setValue(180)  # default 3 min
+        self.layout.addWidget(QLabel("Session Duration (s)"))
+        self.layout.addWidget(self.session_duration_slider)
+
         self.setLayout(self.layout)
 
     def init_lfos(self):
-        self.layer_lfos = [LayerLFO() for _ in range(4)]
-        self.lfo_reverb = LFO(0.02, 0.3)
-        self.lfo_delay = LFO(0.01, 0.2)
+        # LFOs for evolving preset parameters
+        self.lfo_tempo = LFO(rate=0.005, amplitude=20)  # BPM modulation
+        self.lfo_reverb = LFO(rate=0.002, amplitude=0.5)  # Reverb modulation
+        self.lfo_delay = LFO(rate=0.002, amplitude=0.5)   # Delay modulation
+        self.lfo_chorus = LFO(rate=0.001, amplitude=0.5)
+        self.lfo_phaser = LFO(rate=0.001, amplitude=0.5)
+        self.lfo_stereo = LFO(rate=0.001, amplitude=0.5)
+        # LFOs per instrument layer
+        self.layer_lfos = []
+        for i in range(4):  # 4 layers: drone, chords, melody, noise
+            lfo = {
+                "volume": LFO(rate=0.001 + 0.001*i, amplitude=0.3),  # Different speeds
+                "pan": LFO(rate=0.0005 + 0.0005*i, amplitude=0.5),
+                "timbre": LFO(rate=0.0007 + 0.0003*i, amplitude=0.5)  # For FM/Noise modulation
+            }
+            self.layer_lfos.append(lfo)
 
     def init_audio_stream(self):
         self.audio_stream = None
@@ -153,6 +201,10 @@ class ProceduralMusicApp(QWidget):
         self.load_preset_btn.clicked.connect(self.load_preset)
         self.preset_combo.currentIndexChanged.connect(self.load_selected_preset)
         self.random_preset_btn.clicked.connect(self.generate_random_preset)
+        self.auto_scene_toggle.stateChanged.connect(self.toggle_auto_scene)
+        self.scene_duration_slider.valueChanged.connect(self.update_scene_duration)
+        self.random_scene_toggle.stateChanged.connect(self.toggle_random_scene)
+        self.export_btn.clicked.connect(self.export_full_session)
 
     def update_tempo(self, value):
         self.tempo = value
@@ -191,33 +243,84 @@ class ProceduralMusicApp(QWidget):
     def stream_chunk(self):
         dt = DURATION_CHUNK
         self.time_accumulator += dt
-        chunk = generate_procedural_chunk(
-            DURATION_CHUNK, self.tempo,
+
+        # --- Scene Switching ---
+        if self.auto_scene_enabled:
+            self.scene_timer += dt
+            if self.scene_timer >= self.scene_duration:
+                self.scene_timer = 0.0
+                self.advance_scene()
+
+        # --- Tempo modulation ---
+        if self.evolving_toggle.isChecked():
+            mod_tempo = int(self.tempo + self.lfo_tempo.step(dt))
+            mod_tempo = max(mod_tempo, 20)
+        else:
+            mod_tempo = self.tempo
+
+        # --- Generate procedural layers ---
+        # Returns a list of 2D numpy arrays: [layer0, layer1, layer2, layer3]
+        layers = generate_procedural_chunk(
+            DURATION_CHUNK,
+            mod_tempo,
             self.scale_combo.currentText(),
             self.inst_combo.currentText(),
-            use_arpeggio=self.arpeggio_toggle.isChecked()
+            use_arpeggio=self.arpeggio_toggle.isChecked(),
+            return_layers=True  # <-- make sure generator supports multiple layers
         )
 
-        # Apply layer LFOs
-        for lfo in self.layer_lfos:
-            vol_mod, pan_mod = lfo.step(dt)
-            mono = np.mean(chunk, axis=1)*(1+vol_mod)
-            chunk = apply_pan(mono, pan_mod)
+        # --- Apply Layer LFOs ---
+        processed_layers = []
+        for i, layer in enumerate(layers):
+            lfo = self.layer_lfos[i % len(self.layer_lfos)]  # safety
+            vol_mod = lfo["volume"].step(dt)
+            pan_mod = lfo["pan"].step(dt)
+            timbre_mod = lfo["timbre"].step(dt)
 
-        # Apply global effect LFOs + new effects
+            # Mono mix, volume modulation
+            mono = np.mean(layer, axis=1) * (1 + vol_mod)
+
+            # Pan modulation
+            stereo = apply_pan(mono, pan_mod)
+
+            # Timbre modulation for FM/Noise
+            if self.inst_combo.currentText() in ["fm_sine", "noise_pad"]:
+                stereo *= (1 + 0.2 * timbre_mod)
+
+            processed_layers.append(stereo)
+
+        # --- Mix all layers ---
+        chunk = np.sum(processed_layers, axis=0)
+        chunk = np.clip(chunk, -1, 1)
+
+        # --- Apply global evolving effects ---
+        if self.evolving_toggle.isChecked():
+            reverb_amount = min(max(self.reverb_slider.value()/100 + self.lfo_reverb.step(dt),0),1)
+            delay_amount = min(max(self.delay_slider.value()/100 + self.lfo_delay.step(dt),0),1)
+            chorus_amount = min(max(self.chorus_slider.value()/100 + self.lfo_chorus.step(dt),0),1)
+            phaser_amount = min(max(self.phaser_slider.value()/100 + self.lfo_phaser.step(dt),0),1)
+            stereo_widen = min(max(self.stereo_slider.value()/100 + self.lfo_stereo.step(dt),0),1)
+        else:
+            reverb_amount = self.reverb_slider.value()/100
+            delay_amount = self.delay_slider.value()/100
+            chorus_amount = self.chorus_slider.value()/100
+            phaser_amount = self.phaser_slider.value()/100
+            stereo_widen = self.stereo_slider.value()/100
+
         chunk = process_effects(
             chunk,
-            reverb_amount=self.reverb_slider.value()/100*(1+self.lfo_reverb.step(dt)),
-            delay_amount=self.delay_slider.value()/100*(1+self.lfo_delay.step(dt)),
+            reverb_amount=reverb_amount,
+            delay_amount=delay_amount,
             lowpass_cutoff=self.lowpass_slider.value(),
             highpass_cutoff=self.highpass_slider.value(),
-            chorus_amount=self.chorus_slider.value()/100,
-            phaser_amount=self.phaser_slider.value()/100,
-            stereo_widen=self.stereo_slider.value()/100
+            chorus_amount=chorus_amount,
+            phaser_amount=phaser_amount,
+            stereo_widen=stereo_widen
         )
 
+        # --- Playback and Recording ---
         if self.audio_stream:
-            self.audio_stream.write(chunk)
+            self.audio_stream.write(chunk.astype(np.float32))
         if self.record_btn.isChecked():
             self.recording_buffer.append(chunk)
 
@@ -332,10 +435,174 @@ class ProceduralMusicApp(QWidget):
 
       print("Random preset generated")
 
-def load_selected_preset(self):
-    preset_name = self.preset_combo.currentText()
-    if preset_name:
-        self.load_preset_file(os.path.join(PRESET_FOLDER, preset_name))
+    def load_selected_preset(self):
+        preset_name = self.preset_combo.currentText()
+        if preset_name:
+            self.load_preset_file(os.path.join(PRESET_FOLDER, preset_name))
+
+    def toggle_auto_scene(self):
+        self.auto_scene_enabled = self.auto_scene_toggle.isChecked()
+        self.load_scene_list()
+
+    def update_scene_duration(self, value):
+        self.scene_duration = value
+
+    def load_scene_list(self):
+        """Load all presets in the folder as scenes"""
+        self.scenes = [os.path.join(PRESET_FOLDER, f) for f in os.listdir(PRESET_FOLDER) if f.endswith(".json")]
+        self.current_scene_index = 0
+
+    def advance_scene(self):
+        if self.random_scene_enabled:
+            self.generate_random_scene()
+        else:
+            if not self.scenes:
+                return
+            self.current_scene_index = (self.current_scene_index + 1) % len(self.scenes)
+            self.load_preset_file(self.scenes[self.current_scene_index])
+            print(f"Switched to scene: {os.path.basename(self.scenes[self.current_scene_index])}")
+
+    def toggle_random_scene(self):
+        self.random_scene_enabled = self.random_scene_toggle.isChecked()
+        if self.random_scene_enabled:
+            self.auto_scene_enabled = True
+            self.auto_scene_toggle.setChecked(True)
+
+    def generate_random_scene(self):
+        """Generate a fully random preset scene and apply it"""
+        self.generate_random_preset()  # Reuse existing random preset generator
+        # Optional: randomize LFOs for more dynamic evolution
+        for i, lfo in enumerate(self.layer_lfos):
+            lfo["volume"].rate = random.uniform(0.0005, 0.005)
+            lfo["volume"].amplitude = random.uniform(0.1, 0.5)
+            lfo["pan"].rate = random.uniform(0.0002, 0.003)
+            lfo["pan"].amplitude = random.uniform(0.3, 0.7)
+            lfo["timbre"].rate = random.uniform(0.0001, 0.003)
+            lfo["timbre"].amplitude = random.uniform(0.1, 0.5)
+
+        # Randomize global LFOs
+        self.lfo_tempo.rate = random.uniform(0.002, 0.01)
+        self.lfo_tempo.amplitude = random.uniform(5, 25)
+        self.lfo_reverb.rate = random.uniform(0.001, 0.005)
+        self.lfo_reverb.amplitude = random.uniform(0.2, 0.6)
+        self.lfo_delay.rate = random.uniform(0.001, 0.005)
+        self.lfo_delay.amplitude = random.uniform(0.2, 0.6)
+        self.lfo_chorus.rate = random.uniform(0.0005, 0.003)
+        self.lfo_chorus.amplitude = random.uniform(0.1, 0.5)
+        self.lfo_phaser.rate = random.uniform(0.0005, 0.003)
+        self.lfo_phaser.amplitude = random.uniform(0.1, 0.5)
+        self.lfo_stereo.rate = random.uniform(0.0005, 0.003)
+        self.lfo_stereo.amplitude = random.uniform(0.1, 0.5)
+
+        print("Procedural random scene generated")
+
+    def export_full_session(self):
+        total_duration = self.session_duration_slider.value()
+        chunk_duration = DURATION_CHUNK
+        num_chunks = int(total_duration / chunk_duration)
+        session_audio = []
+
+        print(f"Exporting full session: {total_duration}s ({num_chunks} chunks)")
+
+        # Save dialog
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export Full Session", "", "MP3 Files (*.mp3);;WAV Files (*.wav)"
+        )
+        if not filename:
+            return
+        if not (filename.endswith(".wav") or filename.endswith(".mp3")):
+            filename += ".wav"
+
+        # Reset scene timer and index
+        self.scene_timer = 0.0
+        current_scene_idx = self.current_scene_index
+
+        for i in range(num_chunks):
+            # --- Scene switching ---
+            if self.auto_scene_enabled and (i * chunk_duration) % self.scene_duration == 0:
+                self.scene_timer = 0.0
+                self.advance_scene()
+
+            # --- Tempo modulation for export ---
+            if self.evolving_toggle.isChecked():
+                mod_tempo = int(self.tempo + self.lfo_tempo.step(chunk_duration))
+                mod_tempo = max(mod_tempo, 20)
+            else:
+                mod_tempo = self.tempo
+
+            # --- Generate procedural layers ---
+            layers = generate_procedural_chunk(
+                chunk_duration,
+                mod_tempo,
+                self.scale_combo.currentText(),
+                self.inst_combo.currentText(),
+                use_arpeggio=self.arpeggio_toggle.isChecked(),
+                return_layers=True
+            )
+
+            # --- Apply Layer LFOs ---
+            processed_layers = []
+            for j, layer in enumerate(layers):
+                lfo = self.layer_lfos[j % len(self.layer_lfos)]
+                vol_mod = lfo["volume"].step(chunk_duration)
+                pan_mod = lfo["pan"].step(chunk_duration)
+                timbre_mod = lfo["timbre"].step(chunk_duration)
+
+                mono = np.mean(layer, axis=1) * (1 + vol_mod)
+                stereo = apply_pan(mono, pan_mod)
+
+                if self.inst_combo.currentText() in ["fm_sine", "noise_pad"]:
+                    stereo *= (1 + 0.2 * timbre_mod)
+
+                processed_layers.append(stereo)
+
+            # --- Mix layers ---
+            chunk = np.sum(processed_layers, axis=0)
+            chunk = np.clip(chunk, -1, 1)
+
+            # --- Apply global evolving effects ---
+            if self.evolving_toggle.isChecked():
+                reverb_amount = min(max(self.reverb_slider.value()/100 + self.lfo_reverb.step(chunk_duration),0),1)
+                delay_amount = min(max(self.delay_slider.value()/100 + self.lfo_delay.step(chunk_duration),0),1)
+                chorus_amount = min(max(self.chorus_slider.value()/100 + self.lfo_chorus.step(chunk_duration),0),1)
+                phaser_amount = min(max(self.phaser_slider.value()/100 + self.lfo_phaser.step(chunk_duration),0),1)
+                stereo_widen = min(max(self.stereo_slider.value()/100 + self.lfo_stereo.step(chunk_duration),0),1)
+            else:
+                reverb_amount = self.reverb_slider.value()/100
+                delay_amount = self.delay_slider.value()/100
+                chorus_amount = self.chorus_slider.value()/100
+                phaser_amount = self.phaser_slider.value()/100
+                stereo_widen = self.stereo_slider.value()/100
+
+            chunk = process_effects(
+                chunk,
+                reverb_amount=reverb_amount,
+                delay_amount=delay_amount,
+                lowpass_cutoff=self.lowpass_slider.value(),
+                highpass_cutoff=self.highpass_slider.value(),
+                chorus_amount=chorus_amount,
+                phaser_amount=phaser_amount,
+                stereo_widen=stereo_widen
+            )
+
+            session_audio.append(chunk)
+
+        # --- Concatenate all chunks ---
+        full_audio = np.concatenate(session_audio)
+        full_audio = np.clip(full_audio, -1, 1)
+
+        # --- Save WAV ---
+        write(filename, SAMPLE_RATE, (full_audio*32767).astype(np.int16))
+        print(f"Session exported as {filename}")
+
+        # --- Optional: convert to MP3 ---
+        if filename.endswith(".wav"):
+            try:
+                AudioSegment.from_wav(filename).export(filename.replace(".wav", ".mp3"), format="mp3")
+                print(f"MP3 version saved: {filename.replace('.wav','.mp3')}")
+            except:
+                print("pydub not installed or failed, MP3 conversion skipped")
+
 
 if __name__=="__main__":
     app=QApplication(sys.argv)

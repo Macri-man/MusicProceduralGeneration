@@ -30,7 +30,7 @@ def generate_arpeggio(chord, duration, instrument='sine', volume=0.05, style='up
         arpeggio_audio[start_idx:end_idx]+=tone[:len(arpeggio_audio[start_idx:end_idx])]
     return arpeggio_audio
 
-def generate_procedural_chunk(duration, tempo, scale='minor', instrument='sine', use_arpeggio=True):
+def generate_procedural_chunk(duration, tempo, scale='minor', instrument='sine', use_arpeggio=True, return_layers=False):
     beats=int(duration/60*tempo)
     audio=np.zeros(int(duration*44100),dtype=np.float32)
     scale_notes=SCALES[scale]
