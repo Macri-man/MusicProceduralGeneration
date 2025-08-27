@@ -1,7 +1,9 @@
 import sys
 import numpy as np
+import os
+import random
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QPushButton, QSlider, QLabel, QComboBox, QFileDialog, QCheckBox
+    QApplication, QWidget, QVBoxLayout, QPushButton, QSlider, QLabel, QComboBox, QFileDialog, QCheckBox, QComboBox
 )
 from PyQt6.QtCore import Qt, QTimer
 import sounddevice as sd
@@ -15,6 +17,11 @@ from lfo import LFO, LayerLFO
 DURATION_CHUNK = 5  # seconds per chunk
 
 INSTRUMENTS = ['sine', 'square', 'triangle', 'sawtooth', 'fm_sine', 'noise_pad']
+
+PRESET_FOLDER = "presets"
+
+if not os.path.exists(PRESET_FOLDER):
+    os.makedirs(PRESET_FOLDER)
 
 class ProceduralMusicApp(QWidget):
     def __init__(self):
@@ -114,6 +121,20 @@ class ProceduralMusicApp(QWidget):
         self.record_btn.setCheckable(True)
         self.layout.addWidget(self.record_btn)
 
+        self.save_preset_btn = QPushButton("Save Preset")
+        self.load_preset_btn = QPushButton("Load Preset")
+        self.layout.addWidget(self.save_preset_btn)
+        self.layout.addWidget(self.load_preset_btn)
+
+        self.preset_combo = QComboBox()
+        self.layout.addWidget(QLabel("Load Preset"))
+        self.layout.addWidget(self.preset_combo)
+
+        self.refresh_presets()
+
+        self.random_preset_btn = QPushButton("Random Preset")
+        self.layout.addWidget(self.random_preset_btn)
+
         self.setLayout(self.layout)
 
     def init_lfos(self):
@@ -128,6 +149,10 @@ class ProceduralMusicApp(QWidget):
         self.tempo_slider.valueChanged.connect(self.update_tempo)
         self.preview_btn.clicked.connect(self.toggle_live_preview)
         self.record_btn.clicked.connect(self.toggle_recording)
+        self.save_preset_btn.clicked.connect(self.save_preset)
+        self.load_preset_btn.clicked.connect(self.load_preset)
+        self.preset_combo.currentIndexChanged.connect(self.load_selected_preset)
+        self.random_preset_btn.clicked.connect(self.generate_random_preset)
 
     def update_tempo(self, value):
         self.tempo = value
@@ -195,6 +220,122 @@ class ProceduralMusicApp(QWidget):
             self.audio_stream.write(chunk)
         if self.record_btn.isChecked():
             self.recording_buffer.append(chunk)
+
+    def save_preset(self):
+        preset = {
+            "tempo": self.tempo_slider.value(),
+            "scale": self.scale_combo.currentText(),
+            "instrument": self.inst_combo.currentText(),
+            "use_arpeggio": self.arpeggio_toggle.isChecked(),
+            "reverb": self.reverb_slider.value(),
+            "delay": self.delay_slider.value(),
+            "chorus": self.chorus_slider.value(),
+            "phaser": self.phaser_slider.value(),
+            "stereo_widen": self.stereo_slider.value(),
+            "lowpass": self.lowpass_slider.value(),
+            "highpass": self.highpass_slider.value()
+        }
+        filename, _ = QFileDialog.getSaveFileName(self, "Save Preset", "", "JSON Files (*.json)")
+        if filename:
+            if not filename.endswith(".json"):
+                filename += ".json"
+            with open(filename, 'w') as f:
+                json.dump(preset, f, indent=4)
+            print(f"Preset saved to {filename}")
+
+    def load_preset(self):
+        filename, _ = QFileDialog.getOpenFileName(self, "Load Preset", "", "JSON Files (*.json)")
+        if filename and os.path.exists(filename):
+            with open(filename, 'r') as f:
+                preset = json.load(f)
+            # Apply preset values
+            self.tempo_slider.setValue(preset.get("tempo", 60))
+            self.scale_combo.setCurrentText(preset.get("scale", "minor"))
+            self.inst_combo.setCurrentText(preset.get("instrument", "sine"))
+            self.arpeggio_toggle.setChecked(preset.get("use_arpeggio", True))
+            self.reverb_slider.setValue(preset.get("reverb",30))
+            self.delay_slider.setValue(preset.get("delay",30))
+            self.chorus_slider.setValue(preset.get("chorus",0))
+            self.phaser_slider.setValue(preset.get("phaser",0))
+            self.stereo_slider.setValue(preset.get("stereo_widen",0))
+            self.lowpass_slider.setValue(preset.get("lowpass",15000))
+            self.highpass_slider.setValue(preset.get("highpass",20))
+            print(f"Preset loaded from {filename}")
+
+    def refresh_presets(self):
+        """Refresh preset dropdown from folder"""
+        self.preset_combo.clear()
+        presets = [f for f in os.listdir(PRESET_FOLDER) if f.endswith(".json")]
+        self.preset_combo.addItems(presets)
+
+    def save_preset(self):
+        preset_name, ok = QFileDialog.getSaveFileName(self, "Save Preset", PRESET_FOLDER, "JSON Files (*.json)")
+        if preset_name:
+            if not preset_name.endswith(".json"):
+                preset_name += ".json"
+            preset = {
+                "tempo": self.tempo_slider.value(),
+                "scale": self.scale_combo.currentText(),
+                "instrument": self.inst_combo.currentText(),
+                "use_arpeggio": self.arpeggio_toggle.isChecked(),
+                "reverb": self.reverb_slider.value(),
+                "delay": self.delay_slider.value(),
+                "chorus": self.chorus_slider.value(),
+                "phaser": self.phaser_slider.value(),
+                "stereo_widen": self.stereo_slider.value(),
+                "lowpass": self.lowpass_slider.value(),
+                "highpass": self.highpass_slider.value()
+            }
+            with open(preset_name, 'w') as f:
+                json.dump(preset, f, indent=4)
+            print(f"Preset saved to {preset_name}")
+            self.refresh_presets()
+
+    def load_preset_file(self, filename):
+        if filename and os.path.exists(filename):
+            with open(filename, 'r') as f:
+                preset = json.load(f)
+            self.tempo_slider.setValue(preset.get("tempo", 60))
+            self.scale_combo.setCurrentText(preset.get("scale", "minor"))
+            self.inst_combo.setCurrentText(preset.get("instrument", "sine"))
+            self.arpeggio_toggle.setChecked(preset.get("use_arpeggio", True))
+            self.reverb_slider.setValue(preset.get("reverb",30))
+            self.delay_slider.setValue(preset.get("delay",30))
+            self.chorus_slider.setValue(preset.get("chorus",0))
+            self.phaser_slider.setValue(preset.get("phaser",0))
+            self.stereo_slider.setValue(preset.get("stereo_widen",0))
+            self.lowpass_slider.setValue(preset.get("lowpass",15000))
+            self.highpass_slider.setValue(preset.get("highpass",20))
+            print(f"Preset loaded from {filename}")
+
+    def generate_random_preset(self):
+      """Randomly set all parameters to create a new preset"""
+      tempo = random.randint(40, 160)
+      self.tempo_slider.setValue(tempo)
+
+      scale = random.choice(list(SCALES.keys()))
+      self.scale_combo.setCurrentText(scale)
+
+      instrument = random.choice(INSTRUMENTS)
+      self.inst_combo.setCurrentText(instrument)
+
+      self.arpeggio_toggle.setChecked(random.choice([True, False]))
+
+      self.reverb_slider.setValue(random.randint(0, 100))
+      self.delay_slider.setValue(random.randint(0, 100))
+      self.chorus_slider.setValue(random.randint(0, 100))
+      self.phaser_slider.setValue(random.randint(0, 100))
+      self.stereo_slider.setValue(random.randint(0, 100))
+
+      self.lowpass_slider.setValue(random.randint(5000, 20000))
+      self.highpass_slider.setValue(random.randint(20, 5000))
+
+      print("Random preset generated")
+
+def load_selected_preset(self):
+    preset_name = self.preset_combo.currentText()
+    if preset_name:
+        self.load_preset_file(os.path.join(PRESET_FOLDER, preset_name))
 
 if __name__=="__main__":
     app=QApplication(sys.argv)
