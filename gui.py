@@ -1,7 +1,7 @@
 import sys
 import numpy as np
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QPushButton, QSlider, QLabel, QComboBox, QFileDialog
+    QApplication, QWidget, QVBoxLayout, QPushButton, QSlider, QLabel, QComboBox, QFileDialog, QCheckBox
 )
 from PyQt6.QtCore import Qt, QTimer
 import sounddevice as sd
@@ -13,12 +13,13 @@ from procedural_generator import generate_procedural_chunk, SCALES
 from lfo import LFO, LayerLFO
 
 DURATION_CHUNK = 5  # seconds per chunk
-INSTRUMENTS = ['sine', 'square', 'triangle', 'sawtooth']
+
+INSTRUMENTS = ['sine', 'square', 'triangle', 'sawtooth', 'fm_sine', 'noise_pad']
 
 class ProceduralMusicApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Modular Procedural Ambient DAW")
+        self.setWindowTitle("Cinematic Procedural Ambient DAW")
         self.layout = QVBoxLayout()
 
         self.init_ui()
@@ -56,6 +57,11 @@ class ProceduralMusicApp(QWidget):
         self.layout.addWidget(QLabel("Instrument"))
         self.layout.addWidget(self.inst_combo)
 
+        # Arpeggio toggle
+        self.arpeggio_toggle = QCheckBox("Use Arpeggios / Inversions")
+        self.arpeggio_toggle.setChecked(True)
+        self.layout.addWidget(self.arpeggio_toggle)
+
         # Effects sliders
         self.reverb_slider = QSlider(Qt.Orientation.Horizontal)
         self.reverb_slider.setRange(0, 100)
@@ -68,6 +74,24 @@ class ProceduralMusicApp(QWidget):
         self.delay_slider.setValue(30)
         self.layout.addWidget(QLabel("Delay"))
         self.layout.addWidget(self.delay_slider)
+
+        self.chorus_slider = QSlider(Qt.Orientation.Horizontal)
+        self.chorus_slider.setRange(0,100)
+        self.chorus_slider.setValue(0)
+        self.layout.addWidget(QLabel("Chorus"))
+        self.layout.addWidget(self.chorus_slider)
+
+        self.phaser_slider = QSlider(Qt.Orientation.Horizontal)
+        self.phaser_slider.setRange(0,100)
+        self.phaser_slider.setValue(0)
+        self.layout.addWidget(QLabel("Phaser"))
+        self.layout.addWidget(self.phaser_slider)
+
+        self.stereo_slider = QSlider(Qt.Orientation.Horizontal)
+        self.stereo_slider.setRange(0,100)
+        self.stereo_slider.setValue(0)
+        self.layout.addWidget(QLabel("Stereo Widen"))
+        self.layout.addWidget(self.stereo_slider)
 
         self.lowpass_slider = QSlider(Qt.Orientation.Horizontal)
         self.lowpass_slider.setRange(20, 20000)
@@ -142,9 +166,12 @@ class ProceduralMusicApp(QWidget):
     def stream_chunk(self):
         dt = DURATION_CHUNK
         self.time_accumulator += dt
-        chunk = generate_procedural_chunk(DURATION_CHUNK, self.tempo,
-                                          self.scale_combo.currentText(),
-                                          self.inst_combo.currentText())
+        chunk = generate_procedural_chunk(
+            DURATION_CHUNK, self.tempo,
+            self.scale_combo.currentText(),
+            self.inst_combo.currentText(),
+            use_arpeggio=self.arpeggio_toggle.isChecked()
+        )
 
         # Apply layer LFOs
         for lfo in self.layer_lfos:
@@ -152,13 +179,16 @@ class ProceduralMusicApp(QWidget):
             mono = np.mean(chunk, axis=1)*(1+vol_mod)
             chunk = apply_pan(mono, pan_mod)
 
-        # Apply global effect LFOs
+        # Apply global effect LFOs + new effects
         chunk = process_effects(
             chunk,
-            reverb_amount=(self.reverb_slider.value()/100)*(1+self.lfo_reverb.step(dt)),
-            delay_amount=(self.delay_slider.value()/100)*(1+self.lfo_delay.step(dt)),
+            reverb_amount=self.reverb_slider.value()/100*(1+self.lfo_reverb.step(dt)),
+            delay_amount=self.delay_slider.value()/100*(1+self.lfo_delay.step(dt)),
             lowpass_cutoff=self.lowpass_slider.value(),
-            highpass_cutoff=self.highpass_slider.value()
+            highpass_cutoff=self.highpass_slider.value(),
+            chorus_amount=self.chorus_slider.value()/100,
+            phaser_amount=self.phaser_slider.value()/100,
+            stereo_widen=self.stereo_slider.value()/100
         )
 
         if self.audio_stream:
@@ -166,9 +196,8 @@ class ProceduralMusicApp(QWidget):
         if self.record_btn.isChecked():
             self.recording_buffer.append(chunk)
 
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = ProceduralMusicApp()
+if __name__=="__main__":
+    app=QApplication(sys.argv)
+    window=ProceduralMusicApp()
     window.show()
     sys.exit(app.exec())
