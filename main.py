@@ -1,18 +1,16 @@
 import sys
 import numpy as np
-from scipy.io.wavfile import write
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QPushButton, QSlider, QLabel, QComboBox, QFileDialog
+    QApplication, QWidget, QVBoxLayout, QPushButton, QSlider, QLabel, QComboBox
 )
-from PyQt6.QtCore import Qt
-from pydub import AudioSegment
-import sounddevice as sd  # For audio preview
+from PyQt6.QtCore import Qt, QTimer
+import sounddevice as sd
 
 # =====================
 # SETTINGS
 # =====================
 SAMPLE_RATE = 44100
-DURATION = 60
+DURATION_CHUNK = 5  # seconds per generated chunk
 TEMPO = 60
 SCALE = 'minor'
 INSTRUMENTS = ['sine', 'square', 'triangle', 'sawtooth']
@@ -25,7 +23,7 @@ SCALES = {
 }
 
 # =====================
-# SOUND UTILITIES
+# SOUND UTILS
 # =====================
 def midi_to_freq(midi_note):
     return 440 * 2 ** ((midi_note - 69) / 12)
@@ -40,25 +38,11 @@ def generate_tone(frequency, duration, instrument='sine', volume=0.2):
         wave = 2 * np.arcsin(np.sin(2 * np.pi * frequency * t)) / np.pi
     elif instrument == 'sawtooth':
         wave = 2 * (t * frequency - np.floor(0.5 + t * frequency))
-    return (wave * volume * 32767).astype(np.int16)
-
-def apply_reverb(signal, decay=0.3, delay_time=0.03):
-    delay_samples = int(SAMPLE_RATE * delay_time)
-    reverb_signal = np.copy(signal)
-    for i in range(delay_samples, len(signal)):
-        reverb_signal[i] += int(signal[i - delay_samples] * decay)
-    return np.clip(reverb_signal, -32768, 32767)
-
-def apply_pan(signal, pan=0.0):
-    left = signal * (1 - pan) / 2
-    right = signal * (1 + pan) / 2
-    stereo = np.stack([left, right], axis=1).astype(np.int16)
-    return stereo
+    return (wave * volume).astype(np.float32)
 
 def generate_noise(duration, volume=0.05):
     n_samples = int(duration * SAMPLE_RATE)
-    noise = np.random.normal(0, 1, n_samples) * volume * 32767
-    return np.clip(noise, -32768, 32767).astype(np.int16)
+    return np.random.normal(0, 1, (n_samples,)).astype(np.float32) * volume
 
 def apply_envelope(signal, attack=0.1, decay=0.5):
     n_samples = len(signal)
@@ -69,93 +53,61 @@ def apply_envelope(signal, attack=0.1, decay=0.5):
         env[:attack_samples] = np.linspace(0, 1, attack_samples)
     if decay_samples > 0:
         env[-decay_samples:] = np.linspace(1, 0, decay_samples)
-    return (signal * env).astype(np.int16)
+    return signal * env
 
-def generate_chord(root, scale_notes, chord_type='triad'):
-    if chord_type == 'triad':
-        return [root, root + scale_notes[2], root + scale_notes[4]]
-    else:
-        return [root]
+def apply_pan(signal, pan=0.0):
+    left = signal * (1 - pan) / 2
+    right = signal * (1 + pan) / 2
+    stereo = np.stack([left, right], axis=1)
+    return stereo
 
 # =====================
-# PROCEDURAL MUSIC
+# PROCEDURAL MUSIC GENERATION
 # =====================
-def generate_procedural_music(duration=DURATION, tempo=TEMPO, scale='minor', instrument='sine'):
+def generate_procedural_chunk(duration, tempo, scale, instrument):
     beats = int(duration / 60 * tempo)
-    audio = np.zeros(int(SAMPLE_RATE * duration), dtype=np.int16)
+    audio = np.zeros(int(SAMPLE_RATE * duration), dtype=np.float32)
     scale_notes = SCALES[scale]
-    layers = []
 
-    # Drone
-    drone_audio = np.zeros_like(audio)
+    # Drone layer
     for i in range(beats):
-        root_note = 48 + np.random.choice(scale_notes)
-        freq = midi_to_freq(root_note)
+        root = 48 + np.random.choice(scale_notes)
+        freq = midi_to_freq(root)
         start_idx = int(i * (SAMPLE_RATE * 60 / tempo))
         end_idx = start_idx + int(SAMPLE_RATE * 60 / tempo)
-        tone = generate_tone(freq, 60 / tempo, instrument, volume=0.08)
+        tone = generate_tone(freq, 60 / tempo, instrument, 0.08)
         tone = apply_envelope(tone, attack=0.3, decay=0.7)
-        drone_audio[start_idx:end_idx] += tone[:len(drone_audio[start_idx:end_idx])]
-    drone_audio = apply_reverb(drone_audio, decay=0.3)
-    layers.append(drone_audio)
+        audio[start_idx:end_idx] += tone[:len(audio[start_idx:end_idx])]
 
     # Chord layer
-    chord_audio = np.zeros_like(audio)
     for i in range(beats // 2):
-        root_note = 60 + np.random.choice(scale_notes)
-        chord_notes = generate_chord(root_note, scale_notes)
+        root = 60 + np.random.choice(scale_notes)
+        chord = [root, root + scale_notes[2], root + scale_notes[4]]
         start_idx = int(i * 2 * (SAMPLE_RATE * 60 / tempo))
         end_idx = start_idx + int(2 * (SAMPLE_RATE * 60 / tempo))
-        for note in chord_notes:
+        for note in chord:
             freq = midi_to_freq(note)
-            tone = generate_tone(freq, 2 * 60 / tempo, instrument, volume=0.05)
+            tone = generate_tone(freq, 2 * 60 / tempo, instrument, 0.05)
             tone = apply_envelope(tone, attack=0.5, decay=0.5)
-            chord_audio[start_idx:end_idx] += tone[:len(chord_audio[start_idx:end_idx])]
-    chord_audio = apply_reverb(chord_audio, decay=0.25)
-    layers.append(chord_audio)
+            audio[start_idx:end_idx] += tone[:len(audio[start_idx:end_idx])]
 
     # Melody layer
-    melody_audio = np.zeros_like(audio)
     for i in range(beats):
         if np.random.rand() < 0.2:
             note = 60 + np.random.choice(scale_notes)
             freq = midi_to_freq(note)
             start_idx = int(i * (SAMPLE_RATE * 60 / tempo))
             end_idx = start_idx + int((SAMPLE_RATE * 60 / tempo) / 2)
-            tone = generate_tone(freq, 60 / tempo / 2, instrument, volume=0.07)
+            tone = generate_tone(freq, 60 / tempo / 2, instrument, 0.07)
             tone = apply_envelope(tone, attack=0.05, decay=0.5)
-            melody_audio[start_idx:end_idx] += tone[:len(melody_audio[start_idx:end_idx])]
-    melody_audio = apply_reverb(melody_audio, decay=0.2)
-    layers.append(melody_audio)
+            audio[start_idx:end_idx] += tone[:len(audio[start_idx:end_idx])]
 
     # Noise layer
-    noise_audio = generate_noise(duration, volume=0.02)
-    layers.append(noise_audio)
-
-    # Mix layers
-    for layer in layers:
-        audio += layer
-    audio = np.clip(audio, -32768, 32767)
+    audio += generate_noise(duration, 0.02)
+    audio = np.clip(audio, -1, 1)
     pan = np.random.uniform(-0.5, 0.5)
-    stereo_audio = apply_pan(audio, pan=pan)
-    return stereo_audio
-
-def save_audio(audio_data, filename='output.wav'):
-    if audio_data.ndim == 2:
-        write(filename, SAMPLE_RATE, audio_data)
-    else:
-        write(filename, SAMPLE_RATE, audio_data)
-    AudioSegment.from_wav(filename).export(filename.replace('.wav', '.mp3'), format='mp3')
-
-def play_audio(audio_data):
-    """Preview audio using sounddevice"""
-    # Convert to float32 between -1 and 1
-    if audio_data.ndim == 2:
-        audio_data_f = audio_data.astype(np.float32) / 32768
-    else:
-        audio_data_f = np.stack([audio_data, audio_data], axis=1).astype(np.float32) / 32768
-    sd.play(audio_data_f, samplerate=SAMPLE_RATE)
-    sd.wait()
+    stereo = apply_pan(audio, pan)
+    return stereo
 
 # =====================
 # GUI
@@ -163,7 +115,7 @@ def play_audio(audio_data):
 class ProceduralMusicApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cinematic Ambient Procedural Music Generator")
+        self.setWindowTitle("Live Looping Procedural Music")
         self.layout = QVBoxLayout()
 
         self.tempo_label = QLabel(f"Tempo: {TEMPO} BPM")
@@ -185,58 +137,42 @@ class ProceduralMusicApp(QWidget):
         self.layout.addWidget(QLabel("Instrument"))
         self.layout.addWidget(self.inst_combo)
 
-        self.duration_slider = QSlider(Qt.Orientation.Horizontal)
-        self.duration_slider.setRange(5, 300)
-        self.duration_slider.setValue(DURATION)
-        self.duration_slider.valueChanged.connect(self.update_duration)
-        self.duration_label = QLabel(f"Duration: {DURATION} sec")
-        self.layout.addWidget(self.duration_label)
-        self.layout.addWidget(self.duration_slider)
-
-        self.preview_btn = QPushButton("Preview Music")
-        self.preview_btn.clicked.connect(self.preview_music)
+        self.preview_btn = QPushButton("Start/Stop Live Preview")
+        self.preview_btn.setCheckable(True)
+        self.preview_btn.clicked.connect(self.toggle_live_preview)
         self.layout.addWidget(self.preview_btn)
 
-        self.generate_btn = QPushButton("Generate & Save Music")
-        self.generate_btn.clicked.connect(self.generate_music)
-        self.layout.addWidget(self.generate_btn)
-
         self.setLayout(self.layout)
+
         self.tempo = TEMPO
-        self.duration = DURATION
-        self.last_audio = None
+        self.audio_stream = None
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.stream_chunk)
 
     def update_tempo(self, value):
         self.tempo = value
         self.tempo_label.setText(f"Tempo: {value} BPM")
 
-    def update_duration(self, value):
-        self.duration = value
-        self.duration_label.setText(f"Duration: {value} sec")
+    def toggle_live_preview(self):
+        if self.preview_btn.isChecked():
+            self.audio_stream = sd.OutputStream(
+                samplerate=SAMPLE_RATE, channels=2, dtype='float32')
+            self.audio_stream.start()
+            self.timer.start(DURATION_CHUNK * 1000)  # Generate new chunk every DURATION_CHUNK seconds
+            self.stream_chunk()  # Start immediately
+        else:
+            self.timer.stop()
+            if self.audio_stream:
+                self.audio_stream.stop()
+                self.audio_stream.close()
+                self.audio_stream = None
 
-    def preview_music(self):
-        self.last_audio = generate_procedural_music(
-            duration=self.duration,
-            tempo=self.tempo,
-            scale=self.scale_combo.currentText(),
-            instrument=self.inst_combo.currentText()
-        )
-        play_audio(self.last_audio)
-
-    def generate_music(self):
-        if self.last_audio is None:
-            self.last_audio = generate_procedural_music(
-                duration=self.duration,
-                tempo=self.tempo,
-                scale=self.scale_combo.currentText(),
-                instrument=self.inst_combo.currentText()
-            )
-        filename, _ = QFileDialog.getSaveFileName(self, "Save Music", "", "MP3 Files (*.mp3);;WAV Files (*.wav)")
-        if filename:
-            if not filename.endswith(".wav") and not filename.endswith(".mp3"):
-                filename += ".wav"
-            save_audio(self.last_audio, filename)
-            print(f"Music saved to {filename}")
+    def stream_chunk(self):
+        chunk = generate_procedural_chunk(DURATION_CHUNK, self.tempo,
+                                          self.scale_combo.currentText(),
+                                          self.inst_combo.currentText())
+        if self.audio_stream:
+            self.audio_stream.write(chunk)
 
 # =====================
 # MAIN
